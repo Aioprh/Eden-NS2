@@ -68,8 +68,13 @@ struct detail {
     template<size_t N>
     static consteval auto GetArgInfo(std::array<char, opcode_bitsize> bitstring) {
         //static_assert(N > 0, "unexpected field");
-        std::array<opcode_type, N> masks = {};
-        std::array<size_t, N> shifts = {};
+        // 先按字段收集，字段数可能比访问者参数多一个：LDADD/LDCLR/SWP 这类指令
+        // 的位串开头还有一个单比特的尺寸标记 'z'，它不属于任何参数。
+        // 早先直接写 masks[arg_index]，多出来的那个字段就写到了数组末尾之外
+        // （旧编译器把它当常量折叠吞掉了，NDK 28 的 Clang 会直接报
+        // "assignment to dereferenced one-past-the-end pointer"）。
+        std::array<opcode_type, N + 1> raw_masks = {};
+        std::array<size_t, N + 1> raw_shifts = {};
         size_t arg_index = 0;
         char ch = 0;
         for (size_t i = 0; i < opcode_bitsize; i++) {
@@ -87,8 +92,21 @@ struct detail {
                 }
                 const size_t bit_position = opcode_bitsize - i - 1;
                 //static_assert(arg_index >= N, "unexpected field");
-                masks[arg_index] |= opcode_type(1) << bit_position;
-                shifts[arg_index] = bit_position;
+                if (arg_index < raw_masks.size()) {
+                    raw_masks[arg_index] |= opcode_type(1) << bit_position;
+                    raw_shifts[arg_index] = bit_position;
+                }
+            }
+        }
+        // 多出来的字段在前，丢掉它，后面的参数才对得上各自的位段。
+        std::array<opcode_type, N> masks = {};
+        std::array<size_t, N> shifts = {};
+        const size_t extra = (arg_index + 1) > N ? (arg_index + 1 - N) : 0;
+        for (size_t i = 0; i < N; i++) {
+            const size_t source = i + extra;
+            if (source <= arg_index) {
+                masks[i] = raw_masks[source];
+                shifts[i] = raw_shifts[source];
             }
         }
 #if !defined(DYNARMIC_IGNORE_ASSERTS) && !defined(__ANDROID__)
